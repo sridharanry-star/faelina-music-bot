@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Environment variables & secrets
+.env
+*.local
+
+# Bot runtime settings
+settings.json
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Freebuff Desktop metadata
+.freebuff/
+
+# Archive files
+*.zip
+*.rar
+*.tar.gz
