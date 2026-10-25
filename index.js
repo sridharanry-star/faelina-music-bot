@@ -12,7 +12,7 @@ const {
   Events,
   MessageFlags
 } = require('discord.js');
-const { Poru, Rest } = require('poru');
+const { Poru, Rest, Player } = require('poru');
 
 // Lavalink REST content-type patch:
 // Some Lavalink nodes return 'application/json;charset=utf-8' which fails Poru's
@@ -31,6 +31,18 @@ if (Rest && Rest.prototype && Rest.prototype.get) {
       }
     }
     return res;
+  };
+}
+
+// Poru autoMoveNode crash guard:
+// Prevent unhandled rejection when a node drops and no alternative node is immediately available.
+if (Player && Player.prototype && Player.prototype.autoMoveNode) {
+  const origAutoMoveNode = Player.prototype.autoMoveNode;
+  Player.prototype.autoMoveNode = async function () {
+    if (!this.poru?.leastUsedNodes || this.poru.leastUsedNodes.length === 0) {
+      return;
+    }
+    return origAutoMoveNode.call(this).catch(() => {});
   };
 }
 
@@ -132,12 +144,24 @@ try {
 }
 if (!Array.isArray(nodes) || !nodes.length) {
   nodes = [{
-    name: 'Faelina-Core',
-    host: process.env.LAVALINK_HOST,
-    port: parseInt(process.env.LAVALINK_PORT || '2333', 10),
-    password: process.env.LAVALINK_PASSWORD || 'youshallnotpass',
+    name: 'Ryuga-Core',
+    host: process.env.LAVALINK_HOST || '193.226.78.187',
+    port: parseInt(process.env.LAVALINK_PORT || '4998', 10),
+    password: process.env.LAVALINK_PASSWORD || 'ryugalavalink',
     secure: process.env.LAVALINK_SECURE === 'true'
   }];
+}
+
+// Built-in live Lavalink fallback nodes (auto-failover so bot never drops audio)
+const FALLBACK_LAVALINK_NODES = [
+  { name: 'Nazha-SSL', host: 'lavalink.nazha.online', port: 443, password: 'nazhafreelava', secure: true },
+  { name: 'Trinium-4333', host: 'lavalink.triniumhost.com', port: 4333, password: 'free', secure: false }
+];
+
+for (const fallback of FALLBACK_LAVALINK_NODES) {
+  if (!nodes.some((n) => n.name === fallback.name || (n.host === fallback.host && n.port === fallback.port))) {
+    nodes.push(fallback);
+  }
 }
 
 console.log(`[Faelina Audio] Configured nodes: ${nodes.map((n) => `${n.name} (${n.host}:${n.port})`).join(', ')}`);
@@ -149,6 +173,9 @@ client.poru = new Poru(client, nodes, {
   reconnectTimeout: 10000,
   reconnectTries: 100
 });
+
+// Single-instance tracker: prevents duplicate node/socket creation
+const managedNodes = new Map();
 
 // True when at least one Lavalink node is connected
 const hasNode = () => client.poru.leastUsedNodes.length > 0;
@@ -179,47 +206,52 @@ async function waitForNode(timeoutMs = 0) {
 }
 
 async function restoreNodes() {
-  if (hasNode() || nodeRecoveryInFlight) return null;
+  if (hasNode() || nodeRecoveryInFlight) return client.poru.leastUsedNodes[0] || null;
   nodeRecoveryInFlight = true;
   try {
     for (const config of nodeConfigs) {
-      const existing = client.poru.nodes.get(config.name);
+      let targetNode = managedNodes.get(config.name) || client.poru.nodes.get(config.name);
       try {
-        if (existing) {
+        if (targetNode) {
+          if (targetNode.isConnected) continue;
+
           // Cancel Poru's pending reconnect so two sockets never open at once.
-          if (existing.reconnectAttempt) {
-            clearTimeout(existing.reconnectAttempt);
-            existing.reconnectAttempt = null;
+          if (targetNode.reconnectAttempt) {
+            clearTimeout(targetNode.reconnectAttempt);
+            targetNode.reconnectAttempt = null;
           }
           // Drop the dead socket first: its close handler would otherwise remove
           // the node we are about to re-add under the same name. Aborting a socket
           // that is still connecting emits "error"/"close" on it, so keep no-op
           // listeners attached or Node turns that into an uncaught exception.
-          if (existing.ws) {
-            const stale = existing.ws;
-            existing.ws = null;
+          if (targetNode.ws) {
+            const stale = targetNode.ws;
+            targetNode.ws = null;
             stale.removeAllListeners();
             stale.on('error', () => {});
             stale.on('close', () => {});
             try { stale.terminate(); } catch { /* already closed */ }
           }
-          existing.isConnected = false;
-          existing.attempt = 0;
-          await existing.connect();
+          targetNode.isConnected = false;
+          targetNode.attempt = 0;
+          if (!client.poru.nodes.has(config.name)) {
+            client.poru.nodes.set(config.name, targetNode);
+          }
+          await targetNode.connect();
         } else {
-          await client.poru.addNode(config);
+          targetNode = await client.poru.addNode(config);
+          managedNodes.set(config.name, targetNode);
         }
       } catch (err) {
         console.log(`[Faelina Audio Error] Could not (re)connect ${config.name}:`, err.message);
         continue;
       }
 
-      if (await waitForNode(5000)) {
+      if (await waitForNode(4000)) {
         console.log(`[Faelina Audio] Node ${config.name} recovered ♡`);
         return client.poru.leastUsedNodes[0];
       }
     }
-    console.log('[Faelina Audio] Still no Lavalink node available, retrying soon.');
     return null;
   } finally {
     nodeRecoveryInFlight = false;
@@ -463,43 +495,56 @@ function buildPanelEmbed(player, track) {
   return embed;
 }
 
-// All Buttons Strictly Dark Grey
-function buildPanelButtons() {
+// Fallback Unicode Emojis if server restricts external emojis
+const FALLBACK_EMOJIS = {
+  PREVIOUS: '⏮️',
+  PAUSE_PLAY: '⏯️',
+  STOP: '⏹️',
+  SKIP: '⏭️',
+  LOOP: '🔁',
+  SHUFFLE: '🔀',
+  BASS: '🔊',
+  QUEUE: '📜'
+};
+
+// All Buttons Strictly Dark Grey (supports fallback emojis)
+function buildPanelButtons(useFallback = false) {
+  const emojis = useFallback ? FALLBACK_EMOJIS : EMOJIS;
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('btn_prev')
-      .setEmoji(EMOJIS.PREVIOUS)
+      .setEmoji(emojis.PREVIOUS)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_pause')
-      .setEmoji(EMOJIS.PAUSE_PLAY)
+      .setEmoji(emojis.PAUSE_PLAY)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_skip')
-      .setEmoji(EMOJIS.SKIP)
+      .setEmoji(emojis.SKIP)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_stop')
-      .setEmoji(EMOJIS.STOP)
+      .setEmoji(emojis.STOP)
       .setStyle(ButtonStyle.Secondary)
   );
 
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('btn_loop')
-      .setEmoji(EMOJIS.LOOP)
+      .setEmoji(emojis.LOOP)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_shuffle')
-      .setEmoji(EMOJIS.SHUFFLE)
+      .setEmoji(emojis.SHUFFLE)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_bass')
-      .setEmoji(EMOJIS.BASS)
+      .setEmoji(emojis.BASS)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_queue')
-      .setEmoji(EMOJIS.QUEUE)
+      .setEmoji(emojis.QUEUE)
       .setStyle(ButtonStyle.Secondary)
   );
 
@@ -511,16 +556,22 @@ function buildPanelButtons() {
 // ==========================================
 client.poru.on('nodeConnect', (node) => {
   node.attempt = 0;
+  managedNodes.set(node.name, node);
   console.log(`[Faelina Audio] Connected to Lavalink Node: ${node.name} ✨`);
 
-  // A reconnect starts a fresh Lavalink session: re-send voice state so that
-  // players created before the drop can still play afterwards.
+  // A reconnect starts a fresh Lavalink session: re-send voice state and resume pending tracks
   for (const player of client.poru.players.values()) {
-    if (player.node === node) player.connect();
+    if (player.node === node) {
+      player.connect();
+      if (!player.isPlaying && (player.currentTrack || player.queue.length > 0)) {
+        safe(player.play());
+      }
+    }
   }
 });
 
 client.poru.on('nodeDisconnect', (node, code) => {
+  managedNodes.set(node.name, node);
   if (!code) return; // Poru emits this twice per drop; only the one with a close code matters
   console.log(`[Faelina Audio] Lost connection to ${node.name} (code ${code}).`);
 });
@@ -541,13 +592,33 @@ client.poru.on('debug', (...args) => {
 client.poru.on('trackStart', async (player, track) => {
   await cleanupOldPanel(player.guildId);
 
-  const channel = client.channels.cache.get(player.textChannel);
-  if (!channel) return;
+  let channel = client.channels.cache.get(player.textChannel);
+  if (!channel) {
+    channel = await client.channels.fetch(player.textChannel).catch(() => null);
+  }
+  if (!channel) {
+    console.error(`[Faelina Audio Error] Could not find text channel ${player.textChannel} to send music panel.`);
+    return;
+  }
 
-  const panelMsg = await channel.send({
-    embeds: [buildPanelEmbed(player, track)],
-    components: buildPanelButtons()
-  }).catch(() => null);
+  let useFallback = false;
+  let panelMsg = null;
+  try {
+    panelMsg = await channel.send({
+      embeds: [buildPanelEmbed(player, track)],
+      components: buildPanelButtons(false)
+    });
+  } catch (err) {
+    console.warn('[Faelina Audio Warning] Panel send with custom emojis failed, falling back to standard emojis:', err.message);
+    useFallback = true;
+    panelMsg = await channel.send({
+      embeds: [buildPanelEmbed(player, track)],
+      components: buildPanelButtons(true)
+    }).catch((finalErr) => {
+      console.error('[Faelina Audio Error] Failed to send music panel:', finalErr.message);
+      return null;
+    });
+  }
 
   if (!panelMsg) return;
 
@@ -556,7 +627,7 @@ client.poru.on('trackStart', async (player, track) => {
     try {
       await panelMsg.edit({
         embeds: [buildPanelEmbed(player, track)],
-        components: buildPanelButtons()
+        components: buildPanelButtons(useFallback)
       });
     } catch {
       clearInterval(interval);
@@ -572,9 +643,27 @@ client.poru.on('trackEnd', async (player, track) => {
   await cleanupOldPanel(player.guildId);
 });
 
+client.poru.on('trackError', async (player, track, error) => {
+  console.log(`[Faelina Audio Track Error] Could not play "${track?.info?.title}":`, error?.message || error);
+  await cleanupOldPanel(player.guildId);
+  const channel = client.channels.cache.get(player.textChannel) || await client.channels.fetch(player.textChannel).catch(() => null);
+  if (channel) {
+    channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(THEME_COLOR)
+          .setDescription(`⚠️ **Playback issue with track:** \`${track?.info?.title || 'Unknown track'}\`\n*Reason: ${error?.message || 'Source stream unreachable'}*`)
+      ]
+    }).catch(() => {});
+  }
+  if (player.queue.length > 0) {
+    safe(player.skip());
+  }
+});
+
 client.poru.on('queueEnd', async (player) => {
   await cleanupOldPanel(player.guildId);
-  const channel = client.channels.cache.get(player.textChannel);
+  const channel = client.channels.cache.get(player.textChannel) || await client.channels.fetch(player.textChannel).catch(() => null);
   if (channel) {
     channel.send({
       embeds: [new EmbedBuilder().setColor(THEME_COLOR).setDescription('˗ˏˋ 𝜗𝜚 **Queue completed!** Hope you enjoyed the music. `ˎˊ˗')]
@@ -665,15 +754,17 @@ const slashCommands = [
 // ==========================================
 client.once(Events.ClientReady, async () => {
   client.poru.init(client);
+  for (const [name, node] of client.poru.nodes) {
+    managedNodes.set(name, node);
+  }
   console.log(`[Faelina] Logged in as ${client.user.tag} ♡`);
 
   // Rejoin voice channels of guilds with 24/7 mode enabled.
   restoreStayGuilds().catch((err) => console.log('[Faelina 24/7 Error]', err?.message || err));
 
-  // Self-healing watchdog: rebuild the Lavalink node if it ever drops out.
+  // Self-healing watchdog: reconnect Lavalink nodes if all drop out.
   setInterval(() => {
     if (hasNode()) return;
-    console.log('[Faelina Audio] No Lavalink node connected, attempting recovery...');
     restoreNodes().catch((err) => console.log('[Faelina Audio Error] Node recovery failed:', err.message));
   }, 15000);
 
