@@ -128,16 +128,16 @@ const NO_PREFIX_ALIASES = new Set([
   'say', 'dm', 'status', 'customstatus', 'cstatus', 'custom', 'dev'
 ]);
 
-// Standard Unicode Emojis for Player Buttons (universally supported across all Discord servers)
+// Application Custom Emojis (from Discord Developer Portal)
 const EMOJIS = {
-  PREVIOUS: '⏮️',
-  PAUSE_PLAY: '⏯️',
-  STOP: '⏹️',
-  SKIP: '⏭️',
-  LOOP: '🔁',
-  SHUFFLE: '🔀',
-  BASS: '🔊',
-  QUEUE: '📜'
+  PREVIOUS: '<:Previous:1563173481556869262>',
+  PAUSE_PLAY: '<:pause_play:1563173469443596299>',
+  STOP: '<:stop:1563173477090074747>',
+  SKIP: '<:skip:1563173495263727687>',
+  LOOP: '<:loop:1563173441438220399>',
+  SHUFFLE: '<:shuffle:1563173491224608909>',
+  BASS: '<:bass:1563173437386522756>',
+  QUEUE: '<:queue:1563173486644428850>'
 };
 
 const client = new Client({
