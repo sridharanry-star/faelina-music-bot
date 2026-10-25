@@ -101,13 +101,13 @@ npm start
 
 | Variable | Description | Default / Example |
 | :--- | :--- | :--- |
-| `TOKEN` | Discord Bot Application Token *(Required)* | `MTUxMzA...` |
-| `OWNERS` | Comma-separated Discord User IDs for owner privileges | `1377967442172579843,1247200258719617115` |
-| `SPOTIFY_CLIENT_ID` | Spotify API client ID *(Optional)* | `9f951e...` |
-| `SPOTIFY_CLIENT_SECRET` | Spotify API client secret *(Optional)* | `e0c83c...` |
-| `LAVALINK_HOST` | Primary Lavalink server host | `193.226.78.187` |
-| `LAVALINK_PORT` | Lavalink server port | `4998` |
-| `LAVALINK_PASSWORD` | Lavalink server password | `ryugalavalink` |
+| `TOKEN` | Discord Bot Application Token *(Required)* | `your_bot_token_here` |
+| `OWNERS` | Comma-separated Discord User IDs for owner privileges | `123456789012345678` |
+| `SPOTIFY_CLIENT_ID` | Spotify API client ID *(Optional)* | `your_spotify_client_id` |
+| `SPOTIFY_CLIENT_SECRET` | Spotify API client secret *(Optional)* | `your_spotify_client_secret` |
+| `LAVALINK_HOST` | Primary Lavalink server host | `127.0.0.1` |
+| `LAVALINK_PORT` | Lavalink server port | `2333` |
+| `LAVALINK_PASSWORD` | Lavalink server password | `your_lavalink_password` |
 | `LAVALINK_SECURE` | Use SSL (`true` for https/wss, `false` for http/ws) | `false` |
 | `LAVALINK_NODES` | JSON array of fallback nodes for automatic failover | `[{"name":"Node1", ...}]` |
 
