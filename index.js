@@ -46,6 +46,28 @@ if (Player && Player.prototype && Player.prototype.autoMoveNode) {
   };
 }
 
+// Voice State Update patch:
+// When Discord sends VOICE_STATE_UPDATE after VOICE_SERVER_UPDATE, ensure Lavalink
+// gets the complete voice credentials (token, endpoint, and sessionId) so audio streams reliably.
+if (Poru && Poru.prototype && Poru.prototype.packetUpdate) {
+  const origPacketUpdate = Poru.prototype.packetUpdate;
+  Poru.prototype.packetUpdate = async function (packet) {
+    await origPacketUpdate.call(this, packet);
+    if (packet && packet.t === 'VOICE_STATE_UPDATE') {
+      const player = this.players.get(packet.d?.guild_id);
+      if (player && player.connection && player.connection.voice) {
+        const v = player.connection.voice;
+        if (v.token && v.endpoint && v.sessionId) {
+          player.node.rest.updatePlayer({
+            guildId: player.guildId,
+            data: { voice: v }
+          }).catch(() => {});
+        }
+      }
+    }
+  };
+}
+
 // ==========================================
 // 🛡️ ANTI-CRASH PROTECTION SYSTEM
 // ==========================================
@@ -61,7 +83,6 @@ process.on('uncaughtException', (err) => {
 // ==========================================
 const fs = require('fs');
 const path = require('path');
-const { rankTracks } = require('./ml.js');
 
 const SETTINGS_FILE = path.join(__dirname, 'settings.json');
 
@@ -107,16 +128,16 @@ const NO_PREFIX_ALIASES = new Set([
   'say', 'dm', 'status', 'customstatus', 'cstatus', 'custom', 'dev'
 ]);
 
-// Custom Emojis for Player Buttons
+// Standard Unicode Emojis for Player Buttons (universally supported across all Discord servers)
 const EMOJIS = {
-  PREVIOUS: '<:Previous:1562765089332011009>',
-  PAUSE_PLAY: '<:pause_play:1562765087046115408>',
-  STOP: '<:stop:1562765084592443462>',
-  SKIP: '<:skip:1562765082050564146>',
-  LOOP: '<:loop:1562765079470936064>',
-  SHUFFLE: '<:shuffle:1562765076942032956>',
-  BASS: '<:bass:1562765074458738758>',
-  QUEUE: '<:queue:1562765071912804362>'
+  PREVIOUS: '⏮️',
+  PAUSE_PLAY: '⏯️',
+  STOP: '⏹️',
+  SKIP: '⏭️',
+  LOOP: '🔁',
+  SHUFFLE: '🔀',
+  BASS: '🔊',
+  QUEUE: '📜'
 };
 
 const client = new Client({
@@ -134,38 +155,16 @@ const client = new Client({
 client.on(Events.Error, (err) => console.error('[Faelina Discord Error]', err?.message || err));
 client.on(Events.Warn, (msg) => console.warn('[Faelina Discord Warn]', msg));
 
-// Lavalink Node Setup (supports multiple nodes with automatic failover)
-let nodes;
-try {
-  nodes = process.env.LAVALINK_NODES ? JSON.parse(process.env.LAVALINK_NODES) : null;
-} catch (e) {
-  console.log('[Faelina] LAVALINK_NODES is not valid JSON, falling back to primary node.');
-}
-if (!Array.isArray(nodes) || !nodes.length) {
-  nodes = [{
-    name: 'Ryuga-Core',
-    host: process.env.LAVALINK_HOST || '193.226.78.187',
-    port: parseInt(process.env.LAVALINK_PORT || '4998', 10),
-    password: process.env.LAVALINK_PASSWORD || 'ryugalavalink',
-    secure: process.env.LAVALINK_SECURE === 'true'
-  }];
-}
+// Lavalink Node Setup: Dedicated Ryuga-Core node
+const nodes = [{
+  name: 'Ryuga-Core',
+  host: process.env.LAVALINK_HOST || '193.226.78.187',
+  port: parseInt(process.env.LAVALINK_PORT || '4998', 10),
+  password: process.env.LAVALINK_PASSWORD || 'ryugalavalink',
+  secure: process.env.LAVALINK_SECURE === 'true'
+}];
 
-// Strictly strip out any broken/offline nodes (e.g. Nazha which fails with Cloudflare 524)
-nodes = nodes.filter((n) => !n.name?.toLowerCase().includes('nazha') && !n.host?.toLowerCase().includes('nazha'));
-
-// Built-in live Lavalink fallback node (ensures high availability)
-const FALLBACK_LAVALINK_NODES = [
-  { name: 'Trinium-4333', host: 'lavalink.triniumhost.com', port: 4333, password: 'free', secure: false }
-];
-
-for (const fallback of FALLBACK_LAVALINK_NODES) {
-  if (!nodes.some((n) => n.name === fallback.name || (n.host === fallback.host && n.port === fallback.port))) {
-    nodes.push(fallback);
-  }
-}
-
-console.log(`[Faelina Audio] Configured nodes: ${nodes.map((n) => `${n.name} (${n.host}:${n.port})`).join(', ')}`);
+console.log(`[Faelina Audio] Configured node: ${nodes[0].name} (${nodes[0].host}:${nodes[0].port})`);
 
 // Poru Audio Engine (Default: YouTube Music)
 client.poru = new Poru(client, nodes, {
@@ -503,56 +502,43 @@ function buildPanelEmbed(player, track) {
   return embed;
 }
 
-// Fallback Unicode Emojis if server restricts external emojis
-const FALLBACK_EMOJIS = {
-  PREVIOUS: '⏮️',
-  PAUSE_PLAY: '⏯️',
-  STOP: '⏹️',
-  SKIP: '⏭️',
-  LOOP: '🔁',
-  SHUFFLE: '🔀',
-  BASS: '🔊',
-  QUEUE: '📜'
-};
-
-// All Buttons Strictly Dark Grey (supports fallback emojis)
-function buildPanelButtons(useFallback = false) {
-  const emojis = useFallback ? FALLBACK_EMOJIS : EMOJIS;
+// All Buttons Strictly Dark Grey
+function buildPanelButtons() {
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('btn_prev')
-      .setEmoji(emojis.PREVIOUS)
+      .setEmoji(EMOJIS.PREVIOUS)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_pause')
-      .setEmoji(emojis.PAUSE_PLAY)
+      .setEmoji(EMOJIS.PAUSE_PLAY)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_skip')
-      .setEmoji(emojis.SKIP)
+      .setEmoji(EMOJIS.SKIP)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_stop')
-      .setEmoji(emojis.STOP)
+      .setEmoji(EMOJIS.STOP)
       .setStyle(ButtonStyle.Secondary)
   );
 
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('btn_loop')
-      .setEmoji(emojis.LOOP)
+      .setEmoji(EMOJIS.LOOP)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_shuffle')
-      .setEmoji(emojis.SHUFFLE)
+      .setEmoji(EMOJIS.SHUFFLE)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_bass')
-      .setEmoji(emojis.BASS)
+      .setEmoji(EMOJIS.BASS)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_queue')
-      .setEmoji(emojis.QUEUE)
+      .setEmoji(EMOJIS.QUEUE)
       .setStyle(ButtonStyle.Secondary)
   );
 
@@ -610,24 +596,13 @@ client.poru.on('trackStart', async (player, track) => {
     return;
   }
 
-  let useFallback = false;
-  let panelMsg = null;
-  try {
-    panelMsg = await channel.send({
-      embeds: [buildPanelEmbed(player, track)],
-      components: buildPanelButtons(false)
-    });
-  } catch (err) {
-    console.warn('[Faelina Audio Warning] Panel send with custom emojis failed, falling back to standard emojis:', err.message);
-    useFallback = true;
-    panelMsg = await channel.send({
-      embeds: [buildPanelEmbed(player, track)],
-      components: buildPanelButtons(true)
-    }).catch((finalErr) => {
-      console.error('[Faelina Audio Error] Failed to send music panel:', finalErr.message);
-      return null;
-    });
-  }
+  const panelMsg = await channel.send({
+    embeds: [buildPanelEmbed(player, track)],
+    components: buildPanelButtons()
+  }).catch((err) => {
+    console.error('[Faelina Audio Error] Failed to send music panel:', err.message);
+    return null;
+  });
 
   if (!panelMsg) return;
 
@@ -636,7 +611,7 @@ client.poru.on('trackStart', async (player, track) => {
     try {
       await panelMsg.edit({
         embeds: [buildPanelEmbed(player, track)],
-        components: buildPanelButtons(useFallback)
+        components: buildPanelButtons()
       });
     } catch {
       clearInterval(interval);
@@ -644,6 +619,10 @@ client.poru.on('trackStart', async (player, track) => {
   }, 5000);
 
   activePanels.set(player.guildId, { msg: panelMsg, interval });
+});
+
+client.poru.on('socketClose', (player, track, data) => {
+  console.log(`[Faelina Audio] Voice socket closed for guild ${player?.guildId}: code ${data?.code}, reason: ${data?.reason}`);
 });
 
 client.poru.on('trackEnd', async (player, track) => {
@@ -820,13 +799,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.respond([]);
       }
 
-      let tracks = res.tracks;
-      try {
-        const ranked = rankTracks(focusedValue, tracks);
-        if (ranked && ranked.length) tracks = ranked;
-      } catch {}
-
-      const choices = tracks.slice(0, 7).map(track => {
+      const choices = res.tracks.slice(0, 7).map(track => {
         const title = track.info.title.length > 70 ? track.info.title.substring(0, 67) + '...' : track.info.title;
         return {
           name: `🎵 ${title} (${track.info.author})`.substring(0, 100),
@@ -881,6 +854,12 @@ async function executePlay(guild, member, channel, query, sendReply) {
         embeds: [new EmbedBuilder().setColor(THEME_COLOR).setDescription('⚠️ **I could not join your voice channel. Please try again in a moment!**')]
       });
     }
+  } else {
+    if (player.voiceChannel !== voiceChannel.id || !player.isConnected) {
+      player.voiceChannel = voiceChannel.id;
+      player.connect();
+    }
+    player.textChannel = channel.id;
   }
 
   const isUrl = /^https?:\/\//i.test(query);
@@ -949,18 +928,6 @@ async function executePlay(guild, member, channel, query, sendReply) {
       ]
     });
   } else {
-    // Apply ML ranking & noise filtering to search queries (non-URLs)
-    if (!isUrl && Array.isArray(res.tracks) && res.tracks.length > 1) {
-      try {
-        const ranked = rankTracks(query, res.tracks);
-        if (ranked && ranked.length) {
-          res.tracks = ranked;
-        }
-      } catch (err) {
-        console.log('[Faelina ML Error]', err.message);
-      }
-    }
-
     const track = res.tracks[0];
     if (!track) {
       return sendReply({
