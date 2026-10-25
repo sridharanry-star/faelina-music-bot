@@ -134,14 +134,12 @@ const client = new Client({
 client.on(Events.Error, (err) => console.error('[Faelina Discord Error]', err?.message || err));
 client.on(Events.Warn, (msg) => console.warn('[Faelina Discord Warn]', msg));
 
-// Lavalink Node Setup (supports multiple fallback nodes)
-// Option A: LAVALINK_NODES='[{"name":"A","host":"x.com","port":443,"password":"pw","secure":true}]'
-// Option B: single node via LAVALINK_HOST / PORT / PASSWORD / SECURE
+// Lavalink Node Setup (supports multiple nodes with automatic failover)
 let nodes;
 try {
   nodes = process.env.LAVALINK_NODES ? JSON.parse(process.env.LAVALINK_NODES) : null;
 } catch (e) {
-  console.log('[Faelina] LAVALINK_NODES is not valid JSON, falling back to single node.');
+  console.log('[Faelina] LAVALINK_NODES is not valid JSON, falling back to primary node.');
 }
 if (!Array.isArray(nodes) || !nodes.length) {
   nodes = [{
@@ -153,9 +151,11 @@ if (!Array.isArray(nodes) || !nodes.length) {
   }];
 }
 
-// Built-in live Lavalink fallback nodes (auto-failover so bot never drops audio)
+// Strictly strip out any broken/offline nodes (e.g. Nazha which fails with Cloudflare 524)
+nodes = nodes.filter((n) => !n.name?.toLowerCase().includes('nazha') && !n.host?.toLowerCase().includes('nazha'));
+
+// Built-in live Lavalink fallback node (ensures high availability)
 const FALLBACK_LAVALINK_NODES = [
-  { name: 'Nazha-SSL', host: 'lavalink.nazha.online', port: 443, password: 'nazhafreelava', secure: true },
   { name: 'Trinium-4333', host: 'lavalink.triniumhost.com', port: 4333, password: 'free', secure: false }
 ];
 
@@ -461,8 +461,9 @@ function stopMusic(player, guildId) {
 function buildPanelEmbed(player, track) {
   const state = getState(player.guildId);
   const position = player.position || 0;
-  const duration = track.info.length || 0;
-  const isStream = track.info.isStream;
+  const info = track?.info || {};
+  const duration = info.length || 0;
+  const isStream = info.isStream;
   const progressBar = isStream
     ? '🔴 ʟɪᴠᴇ sᴛʀᴇᴀᴍ'
     : `${formatTime(position)} ${renderProgressBar(position, duration, 10)} ${formatTime(duration)}`;
@@ -470,14 +471,18 @@ function buildPanelEmbed(player, track) {
   const loopIcon = player.loop === 'TRACK' ? '🔂 Song' : player.loop === 'QUEUE' ? '🔁 Queue' : 'Off';
   const isBass = state.bassboost ? '🔊 Active' : '🔈 Standard';
 
+  const title = (info.title || 'Unknown Title').substring(0, 70);
+  const author = info.author || 'Unknown Artist';
+  const uri = info.uri && /^https?:\/\//i.test(info.uri) ? info.uri : null;
+  const requesterId = info.requester?.id || info.requester || client.user?.id || 'User';
+
   const embed = new EmbedBuilder()
     .setColor(THEME_COLOR)
     .setAuthor({ name: '⋆˚࿔ 𝐧𝐨𝐰 𝐩𝐥𝐚𝐲𝐢𝐧𝐠 𝜗𝜚˚⋆', iconURL: client.user.displayAvatarURL() })
-    .setTitle(track.info.title.substring(0, 70))
-    .setURL(track.info.uri)
+    .setTitle(title)
     .setDescription(
-      `**Author:** \`${track.info.author}\`\n` +
-      `**Requested By:** <@${track.info.requester?.id || track.info.requester}>\n` +
+      `**Author:** \`${author}\`\n` +
+      `**Requested By:** <@${requesterId}>\n` +
       `**Duration:** \`${formatTime(duration)}\`\n\n` +
       `${progressBar}\n`
     )
@@ -488,8 +493,10 @@ function buildPanelEmbed(player, track) {
     )
     .setFooter({ text: 'Faelina • Pure aesthetic vibes ♡', iconURL: client.user.displayAvatarURL() });
 
+  if (uri) embed.setURL(uri);
+
   const songCover = getTrackThumbnail(track);
-  if (songCover) {
+  if (songCover && /^https?:\/\//i.test(songCover)) {
     embed.setThumbnail(songCover);
   }
 
@@ -556,6 +563,7 @@ function buildPanelButtons(useFallback = false) {
 // 🎵 PORU (LAVALINK) EVENTS
 // ==========================================
 client.poru.on('nodeConnect', (node) => {
+  node.isConnected = true;
   node.attempt = 0;
   managedNodes.set(node.name, node);
   console.log(`[Faelina Audio] Connected to Lavalink Node: ${node.name} ✨`);
@@ -770,19 +778,16 @@ client.once(Events.ClientReady, async () => {
   }, 15000);
 
   try {
-    console.log('[Faelina] 🧹 Purging old commands to prevent duplicates...');
+    console.log('[Faelina] 🧹 Deploying slash commands...');
 
-    // 1. Delete all per-server slash commands from every guild
+    // 1. Deploy immediately to all joined servers for instant 0-delay access
     for (const guild of client.guilds.cache.values()) {
-      await guild.commands.set([]).catch(() => {});
+      await guild.commands.set(slashCommands).catch(() => {});
     }
 
-    // 2. Clear out any outdated global commands
-    await client.application.commands.set([]).catch(() => {});
-
-    // 3. Register the clean, fresh command set globally (Single source of truth)
-    await client.application.commands.set(slashCommands);
-    console.log('[Faelina] ✨ Fresh slash commands deployed with 0 duplicates!');
+    // 2. Also deploy globally so any future guilds receive them
+    await client.application.commands.set(slashCommands).catch(() => {});
+    console.log('[Faelina] ✨ Slash commands active and ready across all servers!');
   } catch (err) {
     console.error('[Faelina Command Sync Error]:', err);
   }
@@ -791,6 +796,10 @@ client.once(Events.ClientReady, async () => {
     status: 'idle',
     activities: [{ name: `${prefix}help | 𝜗𝜚 aesthetic tunes`, type: ActivityType.Listening }]
   });
+});
+
+client.on(Events.GuildCreate, async (guild) => {
+  await guild.commands.set(slashCommands).catch(() => {});
 });
 
 // ==========================================
@@ -939,6 +948,7 @@ async function executePlay(guild, member, channel, query, sendReply) {
           .setDescription(`˚.⋆ 𝜗𝜚 **Added Playlist:** \`${res.playlistInfo.name}\` with **${res.tracks.length}** tracks!`)
       ]
     });
+  } else {
     // Apply ML ranking & noise filtering to search queries (non-URLs)
     if (!isUrl && Array.isArray(res.tracks) && res.tracks.length > 1) {
       try {
@@ -952,6 +962,12 @@ async function executePlay(guild, member, channel, query, sendReply) {
     }
 
     const track = res.tracks[0];
+    if (!track) {
+      return sendReply({
+        embeds: [new EmbedBuilder().setColor(THEME_COLOR).setDescription('🔍 **No songs found for that search query.**')]
+      });
+    }
+
     track.info.requester = member.user;
     player.queue.add(track);
 
@@ -1001,6 +1017,14 @@ async function executePlay(guild, member, channel, query, sendReply) {
           }
         });
       }
+    } else {
+      await sendReply({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(THEME_COLOR)
+            .setDescription(`🎶 **Playing:** [${track.info.title}](${track.info.uri})`)
+        ]
+      });
     }
   }
 
