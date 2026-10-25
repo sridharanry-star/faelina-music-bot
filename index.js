@@ -61,6 +61,7 @@ process.on('uncaughtException', (err) => {
 // ==========================================
 const fs = require('fs');
 const path = require('path');
+const { rankTracks } = require('./ml.js');
 
 const SETTINGS_FILE = path.join(__dirname, 'settings.json');
 
@@ -810,7 +811,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.respond([]);
       }
 
-      const choices = res.tracks.slice(0, 7).map(track => {
+      let tracks = res.tracks;
+      try {
+        const ranked = rankTracks(focusedValue, tracks);
+        if (ranked && ranked.length) tracks = ranked;
+      } catch {}
+
+      const choices = tracks.slice(0, 7).map(track => {
         const title = track.info.title.length > 70 ? track.info.title.substring(0, 67) + '...' : track.info.title;
         return {
           name: `🎵 ${title} (${track.info.author})`.substring(0, 100),
@@ -932,7 +939,18 @@ async function executePlay(guild, member, channel, query, sendReply) {
           .setDescription(`˚.⋆ 𝜗𝜚 **Added Playlist:** \`${res.playlistInfo.name}\` with **${res.tracks.length}** tracks!`)
       ]
     });
-  } else {
+    // Apply ML ranking & noise filtering to search queries (non-URLs)
+    if (!isUrl && Array.isArray(res.tracks) && res.tracks.length > 1) {
+      try {
+        const ranked = rankTracks(query, res.tracks);
+        if (ranked && ranked.length) {
+          res.tracks = ranked;
+        }
+      } catch (err) {
+        console.log('[Faelina ML Error]', err.message);
+      }
+    }
+
     const track = res.tracks[0];
     track.info.requester = member.user;
     player.queue.add(track);
